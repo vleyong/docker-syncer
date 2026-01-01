@@ -1,0 +1,84 @@
+name: 批量同步 (Batch Sync)
+
+on:
+  schedule:
+    # 每月 1号 和 15号 北京时间 08:00 (UTC 00:00) 运行
+    - cron: "0 0 1,15 * *"
+  workflow_dispatch:
+
+env:
+  ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+  ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
+
+jobs:
+  batch-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: 批量同步镜像
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # 检查 images.txt 是否存在
+          if [ ! -f "images.txt" ]; then
+            echo "❌ images.txt 不存在，跳过同步。"
+            exit 0
+          fi
+
+          # 逐行读取镜像列表
+          while IFS= read -r image || [ -n "$image" ]; do
+            # 忽略空行和注释
+            [[ -z "$image" || "$image" =~ ^# ]] && continue
+            
+            echo "----------------------------------------"
+            echo "🔄 正在处理: $image"
+            
+            # 使用现有逻辑同步到阿里云
+            SRC_IMAGE="$image"
+            
+            # 提取 Tag (e.g. mysql:8.0 -> mysql:8.0)
+            # 这里简单处理，保持原名。如果需要改名逻辑较复杂。
+            TARGET_TAG=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
+            
+            ALI_TARGET="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/$TARGET_TAG"
+            
+            echo "   🔍 检查镜像摘要..."
+            # 1. 获取上游 Digest
+            skopeo login -u "$DOCKERHUB_USERNAME" -p "$DOCKERHUB_TOKEN" index.docker.io || true # 尝试登录DockerHub避免限流(如有配置)
+            
+            UPSTREAM_DIGEST=$(skopeo inspect --format='{{.Digest}}' docker://$SRC_IMAGE 2>/dev/null || echo "")
+            echo "      -> 上游 Digest: $UPSTREAM_DIGEST"
+            
+            # 2. 获取下游 Digest
+            DEST_DIGEST=$(skopeo inspect --format='{{.Digest}}' docker://$ALI_TARGET 2>/dev/null || echo "")
+            echo "      -> 目标 Digest: $DEST_DIGEST"
+            
+            # 3. 比对
+            if [ -n "$UPSTREAM_DIGEST" ] && [ "$UPSTREAM_DIGEST" == "$DEST_DIGEST" ]; then
+              echo "   ✅ 镜像即使最新 (Digest一致)，跳过同步。"
+              continue
+            fi
+            
+            echo "   📥 拉取: $SRC_IMAGE"
+            docker pull $SRC_IMAGE || { echo "   ❌ 拉取失败: $SRC_IMAGE"; continue; }
+            
+            echo "   🚀 推送: $ALI_TARGET"
+            docker tag $SRC_IMAGE $ALI_TARGET
+            docker push $ALI_TARGET || { echo "   ❌ 推送失败: $ALI_TARGET"; continue; }
+            
+            echo "   ✅ 完成: $ALI_TARGET"
+            
+            # 清理空间，防止 runner 磁盘爆满
+            docker rmi $SRC_IMAGE $ALI_TARGET || true
+            
+          done < images.txt

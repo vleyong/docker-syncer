@@ -11,6 +11,10 @@ on:
         description: '保存到阿里云的名称 (留空则与原名一致)'
         required: false
         default: ''
+      target_namespace:
+        description: '目标命名空间 (留空则使用 Secret 默认值)'
+        required: false
+        default: ''
 
 jobs:
   push-to-aliyun:
@@ -36,7 +40,12 @@ jobs:
           fi
           
           # 组合阿里云的目标地址
-          ALIYUN_TARGET="${{ secrets.ALIYUN_REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/$TARGET_IMAGE_TAG"
+          NAMESPACE="${{ inputs.target_namespace }}"
+          if [ -z "$NAMESPACE" ]; then
+            NAMESPACE="${{ secrets.ALIYUN_NAMESPACE }}"
+          fi
+          
+          ALIYUN_TARGET="${{ secrets.ALIYUN_REGISTRY }}/$NAMESPACE/$TARGET_IMAGE_TAG"
           
           echo "正在从 $SRC_IMAGE 拉取..."
           docker pull $SRC_IMAGE
