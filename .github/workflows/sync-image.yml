@@ -1,0 +1,48 @@
+name: 搬运镜像到阿里云
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: '原镜像名称 (例如: mysql:8.0 或 nginx:latest)'
+        required: true
+        default: 'nginx:latest'
+      new_name:
+        description: '保存到阿里云的名称 (留空则与原名一致)'
+        required: false
+        default: ''
+
+jobs:
+  push-to-aliyun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: 拉取、重命名并推送
+        run: |
+          # 1. 解析输入
+          SRC_IMAGE="${{ inputs.image_name }}"
+          
+          # 如果用户没填新名字，就提取原镜像的最后一段，比如 mysql:8.0
+          if [ -z "${{ inputs.new_name }}" ]; then
+            TARGET_IMAGE_TAG=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
+          else
+            TARGET_IMAGE_TAG="${{ inputs.new_name }}"
+          fi
+          
+          # 组合阿里云的目标地址
+          ALIYUN_TARGET="${{ secrets.ALIYUN_REGISTRY }}/${{ secrets.ALIYUN_NAMESPACE }}/$TARGET_IMAGE_TAG"
+          
+          echo "正在从 $SRC_IMAGE 拉取..."
+          docker pull $SRC_IMAGE
+          
+          echo "正在推送到 $ALIYUN_TARGET ..."
+          docker tag $SRC_IMAGE $ALIYUN_TARGET
+          docker push $ALIYUN_TARGET
+          
+          echo "✅ 成功！国内拉取地址: $ALIYUN_TARGET"
