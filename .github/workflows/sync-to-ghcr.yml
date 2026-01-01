@@ -8,7 +8,7 @@ on:
         required: true
         default: 'nginx:alpine'
       target_name:
-        description: '保存名称 (留空则自动处理，支持 bitnami/nginx -> bitnami_nginx)'
+        description: '保存名称 (留空则自动处理)'
         required: false
       platform:
         description: '指定架构 (例如: linux/arm64，留空默认 amd64)'
@@ -31,7 +31,21 @@ jobs:
       packages: write # 必须权限
 
     steps:
-      - name: 登录 DockerHub (防止限流)
+      # 1. 空间清理 (防止大镜像爆盘)
+      - name: 🗑️ 清理磁盘空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 128
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: 重启 Docker
+        run: sudo service docker restart
+
+      - name: 登录 DockerHub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -50,16 +64,31 @@ jobs:
           # --- 1. 变量准备 ---
           SRC_IMAGE="${{ inputs.image_name }}"
           PLATFORM_ARG=""
+          
+          # 默认架构参数
+          SKOPEO_OS="linux"
+          SKOPEO_ARCH="amd64"
+
           if [ -n "${{ inputs.platform }}" ]; then
             PLATFORM_ARG="--platform ${{ inputs.platform }}"
             echo "⚙️ 指定架构: ${{ inputs.platform }}"
+            
+            # 解析 platform
+            if [[ "${{ inputs.platform }}" == *"/"* ]]; then
+               SKOPEO_OS=$(echo "${{ inputs.platform }}" | awk -F'/' '{print $1}')
+               SKOPEO_ARCH=$(echo "${{ inputs.platform }}" | awk -F'/' '{print $2}')
+            else
+               SKOPEO_ARCH="${{ inputs.platform }}"
+            fi
           fi
+          
+          # 构造 Skopeo 参数
+          SKOPEO_FLAGS="--override-os $SKOPEO_OS --override-arch $SKOPEO_ARCH"
 
           # --- 2. 目标名称计算 (智能前缀) ---
           if [ -n "${{ inputs.target_name }}" ]; then
             TARGET_TAG="${{ inputs.target_name }}"
           else
-             # 提取命名空间 (如 bitnami/nginx -> bitnami)
              SCOPE=$(echo "$SRC_IMAGE" | awk -F'/' '{if (NF>2) print $(NF-1); else if (NF==2 && $1!="library") print $1; else print ""}')
              BASE_NAME=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
              
@@ -69,27 +98,25 @@ jobs:
                 TARGET_TAG="${BASE_NAME}"
              fi
              
-             # 如果是多架构，加前缀 (如 linux_arm64_nginx)
              if [ -n "${{ inputs.platform }}" ]; then
                 PLAT_PREFIX=$(echo "${{ inputs.platform }}" | sed 's/\//_/g')
                 TARGET_TAG="${PLAT_PREFIX}_${TARGET_TAG}"
              fi
           fi
 
-          # --- 3. GHCR 特殊处理：强制转小写 ---
-          # GHCR 要求用户名和镜像名必须全小写
+          # --- 3. GHCR 强制转小写 ---
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           TARGET_TAG=$(echo "$TARGET_TAG" | tr '[:upper:]' '[:lower:]')
           FULL_TARGET="${{ env.REGISTRY }}/$OWNER/$TARGET_TAG"
           
           echo "🎯 目标镜像地址: $FULL_TARGET"
 
-          # --- 4. 智能摘要比对 (Skopeo) ---
+          # --- 4. 智能摘要比对 ---
           NEED_SYNC=true
           if [ "${{ inputs.force_sync }}" == "false" ]; then
              echo "🔍 检查 Digest..."
-             SRC_DIGEST=$(skopeo inspect docker://$SRC_IMAGE --format='{{.Digest}}' 2>/dev/null || echo "")
-             DEST_DIGEST=$(skopeo inspect docker://$FULL_TARGET --format='{{.Digest}}' 2>/dev/null || echo "")
+             SRC_DIGEST=$(skopeo inspect $SKOPEO_FLAGS docker://$SRC_IMAGE --format='{{.Digest}}' 2>/dev/null || echo "")
+             DEST_DIGEST=$(skopeo inspect $SKOPEO_FLAGS docker://$FULL_TARGET --format='{{.Digest}}' 2>/dev/null || echo "")
              
              if [ -n "$SRC_DIGEST" ] && [ "$SRC_DIGEST" == "$DEST_DIGEST" ]; then
                 echo "✅ 摘要一致 ($SRC_DIGEST)，无需同步。"
@@ -99,18 +126,17 @@ jobs:
 
           # --- 5. 执行同步 ---
           if [ "$NEED_SYNC" == "true" ]; then
-             echo "1️⃣ 正在从 DockerHub 拉取: $SRC_IMAGE"
+             echo "📥 拉取: $SRC_IMAGE"
              docker pull $SRC_IMAGE $PLATFORM_ARG
 
-             echo "2️⃣ 正在打标签: $FULL_TARGET"
+             echo "🏷️ 打标签: $FULL_TARGET"
              docker tag $SRC_IMAGE $FULL_TARGET
 
-             echo "3️⃣ 正在推送到 GHCR..."
+             echo "📤 推送: $FULL_TARGET"
              docker push $FULL_TARGET
              
-             echo "🧹 清理本地缓存..."
+             echo "🧹 清理..."
              docker rmi $SRC_IMAGE $FULL_TARGET || true
 
-             echo "✅ 完成! 你的拉取地址是:"
-             echo "docker pull $FULL_TARGET"
+             echo "✅ 完成! docker pull $FULL_TARGET"
           fi
