@@ -8,7 +8,7 @@ on:
         required: true
         default: 'nginx:alpine'
       new_name:
-        description: '保存名称 (留空则自动处理，支持 bitnami/nginx -> bitnami_nginx)'
+        description: '保存名称 (留空则自动处理)'
         required: false
         default: ''
       platform:
@@ -25,6 +25,20 @@ jobs:
   push-to-aliyun:
     runs-on: ubuntu-latest
     steps:
+      # 1. 空间清理
+      - name: 🗑️ 清理磁盘空间
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 128
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: 重启 Docker
+        run: sudo service docker restart
+
       - name: 登录阿里云 ACR
         uses: docker/login-action@v2
         with:
@@ -37,16 +51,27 @@ jobs:
           # 1. 变量准备
           SRC_IMAGE="${{ inputs.image_name }}"
           PLATFORM_ARG=""
+          SKOPEO_OS="linux"
+          SKOPEO_ARCH="amd64"
+
           if [ -n "${{ inputs.platform }}" ]; then
             PLATFORM_ARG="--platform ${{ inputs.platform }}"
             echo "⚙️ 指定架构: ${{ inputs.platform }}"
+            
+            if [[ "${{ inputs.platform }}" == *"/"* ]]; then
+               SKOPEO_OS=$(echo "${{ inputs.platform }}" | awk -F'/' '{print $1}')
+               SKOPEO_ARCH=$(echo "${{ inputs.platform }}" | awk -F'/' '{print $2}')
+            else
+               SKOPEO_ARCH="${{ inputs.platform }}"
+            fi
           fi
+          
+          SKOPEO_FLAGS="--override-os $SKOPEO_OS --override-arch $SKOPEO_ARCH"
 
-          # 2. 目标名称计算 (智能前缀)
+          # 2. 目标名称计算
           if [ -n "${{ inputs.new_name }}" ]; then
             TARGET_TAG="${{ inputs.new_name }}"
           else
-             # 提取命名空间
              SCOPE=$(echo "$SRC_IMAGE" | awk -F'/' '{if (NF>2) print $(NF-1); else if (NF==2 && $1!="library") print $1; else print ""}')
              BASE_NAME=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
              
@@ -56,7 +81,6 @@ jobs:
                 TARGET_TAG="${BASE_NAME}"
              fi
              
-             # 如果是多架构，建议加前缀
              if [ -n "${{ inputs.platform }}" ]; then
                 PLAT_PREFIX=$(echo "${{ inputs.platform }}" | sed 's/\//_/g')
                 TARGET_TAG="${PLAT_PREFIX}_${TARGET_TAG}"
@@ -69,8 +93,8 @@ jobs:
           NEED_SYNC=true
           if [ "${{ inputs.force_sync }}" == "false" ]; then
              echo "🔍 检查 Digest..."
-             SRC_DIGEST=$(skopeo inspect docker://$SRC_IMAGE --format='{{.Digest}}' 2>/dev/null || echo "")
-             DEST_DIGEST=$(skopeo inspect docker://$ALI_TARGET --format='{{.Digest}}' 2>/dev/null || echo "")
+             SRC_DIGEST=$(skopeo inspect $SKOPEO_FLAGS docker://$SRC_IMAGE --format='{{.Digest}}' 2>/dev/null || echo "")
+             DEST_DIGEST=$(skopeo inspect $SKOPEO_FLAGS docker://$ALI_TARGET --format='{{.Digest}}' 2>/dev/null || echo "")
              
              if [ -n "$SRC_DIGEST" ] && [ "$SRC_DIGEST" == "$DEST_DIGEST" ]; then
                 echo "✅ 摘要一致 ($SRC_DIGEST)，无需同步。"
@@ -88,6 +112,9 @@ jobs:
              
              echo "📤 Pushing ..."
              docker push $ALI_TARGET
+             
+             echo "🧹 Cleaning ..."
+             docker rmi $SRC_IMAGE $ALI_TARGET || true
              
              echo "✅ 成功! 国内地址: $ALI_TARGET"
           fi
