@@ -1,6 +1,9 @@
-name: 批量同步 (Batch Sync)
+name: 01. 批量同步 (Batch Sync)
 
 on:
+  push:
+    paths:
+      - "images.txt"
   schedule:
     - cron: "0 0 1,15 * *"
   workflow_dispatch:

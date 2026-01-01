@@ -1,3 +1,4 @@
+name: 03. 单项同步 (To Aliyun)
 env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}

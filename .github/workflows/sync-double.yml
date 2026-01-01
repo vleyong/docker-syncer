@@ -1,4 +1,4 @@
-name: 双重同步 (阿里云 + GHCR)
+name: 02. 双重同步 (Aliyun + GHCR)
 
 on:
   workflow_dispatch:

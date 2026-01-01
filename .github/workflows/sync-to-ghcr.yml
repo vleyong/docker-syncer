@@ -1,4 +1,4 @@
-name: 镜像搬运工 (DockerHub -> GHCR)
+name: 04. 单项同步 (To GHCR)
 env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
   REGISTRY: ghcr.io
