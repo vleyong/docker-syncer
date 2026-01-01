@@ -5,6 +5,12 @@ on:
     # 每月 1号 和 15号 北京时间 08:00 (UTC 00:00) 运行
     - cron: "0 0 1,15 * *"
   workflow_dispatch:
+    inputs:
+      force_sync:
+        description: '强制同步 (跳过摘要比对)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
@@ -14,6 +20,21 @@ jobs:
   batch-sync:
     runs-on: ubuntu-latest
     steps:
+      # 1. 极致空间清理 (在拉取任何东西之前)
+      - name: 🗑️ 清理磁盘空间 (Max Optimization)
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 128
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: 重启 Docker 服务
+        run: sudo service docker restart
+
       - name: Checkout Code
         uses: actions/checkout@v3
 
@@ -24,61 +45,115 @@ jobs:
           username: ${{ secrets.ALIYUN_USERNAME }}
           password: ${{ secrets.ALIYUN_PASSWORD }}
 
-      - name: 批量同步镜像
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 登录 DockerHub (避免限流)
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: 📦 批量处理镜像
         run: |
-          # 检查 images.txt 是否存在
+          # 检查 images.txt
           if [ ! -f "images.txt" ]; then
             echo "❌ images.txt 不存在，跳过同步。"
             exit 0
           fi
 
-          # 逐行读取镜像列表
-          while IFS= read -r image || [ -n "$image" ]; do
-            # 忽略空行和注释
-            [[ -z "$image" || "$image" =~ ^# ]] && continue
+          echo "📋 开始处理镜像列表..."
+          
+          # 逐行读取
+          while IFS= read -r line || [ -n "$line" ]; do
+            # 1. 预处理：去除首尾空格
+            line=$(echo "$line" | xargs)
             
-            echo "----------------------------------------"
-            echo "🔄 正在处理: $image"
+            # 2. 忽略空行和注释
+            [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+            echo "=================================================================="
+            echo "🔄 原始指令: $line"
+
+            # 3. 解析参数 (--platform) 和 镜像名
+            # 提取平台参数，例如 --platform=linux/arm64
+            PLATFORM_ARG=""
+            if [[ "$line" == *"--platform"* ]]; then
+              # 提取 --platform=xxx 或者 --platform xxx
+              # 这里简单匹配 --platform=xxxxx
+              PLATFORM_VAL=$(echo "$line" | grep -oP '(?<=--platform[ =])\S+')
+              if [ -n "$PLATFORM_VAL" ]; then
+                 PLATFORM_ARG="--platform $PLATFORM_VAL"
+                 echo "⚙️ 指定架构: $PLATFORM_VAL"
+              fi
+            fi
+
+            # 提取镜像名称 (取该行的最后一个字段)
+            SRC_IMAGE=$(echo "$line" | awk '{print $NF}')
             
-            # 使用现有逻辑同步到阿里云
-            SRC_IMAGE="$image"
+            # 4. 智能命名策略 (Smart Prefix)
+            # 提取命名空间 (如 bitnami/nginx -> bitnami)
+            SCOPE=$(echo "$SRC_IMAGE" | awk -F'/' '{if (NF>2) print $(NF-1); else if (NF==2 && $1!="library") print $1; else print ""}')
+            # 提取镜像名+Tag (如 nginx:latest)
+            BASE_NAME=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
             
-            # 提取 Tag (e.g. mysql:8.0 -> mysql:8.0)
-            # 这里简单处理，保持原名。如果需要改名逻辑较复杂。
-            TARGET_TAG=$(echo "$SRC_IMAGE" | awk -F'/' '{print $NF}')
-            
-            ALI_TARGET="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/$TARGET_TAG"
-            
-            echo "   🔍 检查镜像摘要..."
-            # 1. 获取上游 Digest
-            skopeo login -u "$DOCKERHUB_USERNAME" -p "$DOCKERHUB_TOKEN" index.docker.io || true # 尝试登录DockerHub避免限流(如有配置)
-            
-            UPSTREAM_DIGEST=$(skopeo inspect --format='{{.Digest}}' docker://$SRC_IMAGE 2>/dev/null || echo "")
-            echo "      -> 上游 Digest: $UPSTREAM_DIGEST"
-            
-            # 2. 获取下游 Digest
-            DEST_DIGEST=$(skopeo inspect --format='{{.Digest}}' docker://$ALI_TARGET 2>/dev/null || echo "")
-            echo "      -> 目标 Digest: $DEST_DIGEST"
-            
-            # 3. 比对
-            if [ -n "$UPSTREAM_DIGEST" ] && [ "$UPSTREAM_DIGEST" == "$DEST_DIGEST" ]; then
-              echo "   ✅ 镜像即使最新 (Digest一致)，跳过同步。"
-              continue
+            if [ -n "$SCOPE" ]; then
+               # 如果有非官方命名空间，加前缀，防止冲突 (e.g. bitnami_nginx:latest)
+               TARGET_TAG="${SCOPE}_${BASE_NAME}"
+            else
+               # 官方镜像保持原样 (e.g. nginx:latest)
+               TARGET_TAG="${BASE_NAME}"
             fi
             
-            echo "   📥 拉取: $SRC_IMAGE"
-            docker pull $SRC_IMAGE || { echo "   ❌ 拉取失败: $SRC_IMAGE"; continue; }
+            # 如果指定了架构，建议在 Tag 里也体现，防止同名不同架构覆盖
+            if [ -n "$PLATFORM_VAL" ]; then
+               # 将 linux/arm64 转为 linux_arm64
+               PLATFORM_TAG=$(echo "$PLATFORM_VAL" | sed 's/\//_/g')
+               TARGET_TAG="${PLATFORM_TAG}_${TARGET_TAG}"
+            fi
+
+            ALI_TARGET="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/$TARGET_TAG"
             
-            echo "   🚀 推送: $ALI_TARGET"
-            docker tag $SRC_IMAGE $ALI_TARGET
-            docker push $ALI_TARGET || { echo "   ❌ 推送失败: $ALI_TARGET"; continue; }
+            # 5. 智能摘要比对 (Skopeo Check)
+            FORCE="${{ inputs.force_sync }}"
+            NEED_PULL=true
+
+            if [ "$FORCE" == "false" ]; then
+               echo "🔍 正在比对 Digest..."
+               # 获取源镜像 Digest (处理多架构情况，inspect 可能返回列表，这里简化取第一个或主 Digest)
+               # 注意：加上 PLATFORM_ARG 传给 skopeo (如果 skopeo 支持的话，或者忽略)
+               # 简单起见，我们对比 docker pull 会拉取到的那个 manifest digest
+               
+               SRC_DIGEST=$(skopeo inspect docker://$SRC_IMAGE --format='{{.Digest}}' 2>/dev/null || echo "")
+               DEST_DIGEST=$(skopeo inspect docker://$ALI_TARGET --format='{{.Digest}}' 2>/dev/null || echo "")
+               
+               if [ -n "$SRC_DIGEST" ] && [ "$SRC_DIGEST" == "$DEST_DIGEST" ]; then
+                  echo "✅ 镜像已是最新 (Digest: ${SRC_DIGEST:0:12})，跳过同步。"
+                  NEED_PULL=false
+               else
+                  echo "🚀 发现更新 (或目标不存在)，准备同步..."
+                  echo "   源: ${SRC_DIGEST:0:12} vs 目标: ${DEST_DIGEST:0:12}"
+               fi
+            else
+               echo "⚠️ 强制同步模式，跳过比对。"
+            fi
+
+            # 6. 执行同步 (边下边删)
+            if [ "$NEED_PULL" == "true" ]; then
+               echo "📥 拉取: $SRC_IMAGE $PLATFORM_ARG"
+               docker pull $SRC_IMAGE $PLATFORM_ARG
+               
+               echo "🏷️ 打标签: $ALI_TARGET"
+               docker tag $SRC_IMAGE $ALI_TARGET
+               
+               echo "📤 推送: $ALI_TARGET"
+               docker push $ALI_TARGET
+               
+               # 7. 立即清理 (关键步骤)
+               echo "🧹 清理本地缓存..."
+               docker rmi $SRC_IMAGE $ALI_TARGET || true
+               echo "✅ 完成！"
+            fi
             
-            echo "   ✅ 完成: $ALI_TARGET"
-            
-            # 清理空间，防止 runner 磁盘爆满
-            docker rmi $SRC_IMAGE $ALI_TARGET || true
-            
+            # 打印当前磁盘剩余
+            df -h | grep "/var/lib/docker" || true
+
           done < images.txt
