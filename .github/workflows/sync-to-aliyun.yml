@@ -4,31 +4,7 @@ env:
   ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
   ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
 
-on:
-  workflow_dispatch:
-    inputs:
-      image_name:
-        description: "原镜像名称 (例如: mysql:8.0)"
-        required: true
-        default: "nginx:alpine"
-      new_name:
-        description: "保存名称 (留空则自动处理)"
-        required: false
-        default: ""
-      platform:
-        description: "指定架构 (例如: linux/arm64，留空默认 amd64)"
-        required: false
-        default: ""
-      force_sync:
-        description: "强制同步 (跳过摘要比对)"
-        type: boolean
-        required: false
-        default: false
-      clean_disk:
-        description: "清理磁盘空间 (减少空间不足风险，但耗时增加)"
-        type: boolean
-        required: false
-        default: false
+
 
 jobs:
   push-to-aliyun:
