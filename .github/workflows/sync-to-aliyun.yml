@@ -1,13 +1,18 @@
 name: 03. 自动同步 (From image.txt to Aliyun)
 
-# 1. 触发条件
 on:
   push:
-    branches:
-      - main  # 如果你的分支名是 dev，请改为 dev
     paths:
-      - 'image.txt'
-  workflow_dispatch: # 保留手动点击按钮，方便不改文件也能跑
+      - "images.txt"
+  schedule:
+    - cron: "0 0 1,15 * *"
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: "强制同步 (跳过摘要比对)"
+        required: false
+        type: boolean
+        default: false
 
 env:
   WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
