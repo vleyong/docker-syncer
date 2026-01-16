@@ -1,4 +1,2 @@
-golang:latest
-docker.io/zefhemel/silverbullet:latest
-openlistteam/openlist:latest
-easytier/easytier:latest
+--platform=linux/arm64 apache/doris:fe-3.0.8
+--platform=linux/arm64 apache/doris:be-3.0.8
